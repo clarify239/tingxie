@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Tingxie (听写) Dictation Practice</title>
+  <style>
+    /* ---------- Basic page styling ---------- */
+    body {
+      font-family: sans-serif;
+      max-width: 720px;
+      margin: 30px auto;
+      padding: 0 16px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 140px;
+      font-size: 16px;
+      box-sizing: border-box;
+    }
+
+    input[type=number] {
+      width: 70px;
+    }
+
+    select {
+      font-size: 15px;
+      padding: 4px;
+    }
+
+    button {
+      padding: 8px 16px;
+      margin: 6px 6px 6px 0;
+      font-size: 15px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    #log {
+      white-space: pre-wrap;
+      background: #f4f4f4;
+      padding: 10px;
+      border: 1px solid #ccc;
+      min-height: 60px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    #wordlist {
+      background: #f9f9f9;
+      padding: 10px;
+      border: 1px solid #ddd;
+      margin-top: 10px;
+    }
+
+    .row {
+      margin: 10px 0;
+    }
+
+    label {
+      font-weight: bold;
+    }
+
+    .hint {
+      color: #666;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>Tingxie (听写) Dictation Practice</h2>
+  <p class="hint">
+    Enter Chinese words or phrases, set the gap between them, then press Play.
+    The browser will speak each word aloud with a pause after it, so you can
+    write down what you hear. This uses your browser's built-in text-to-speech
+    (the Web Speech API).
+  </p>
+
+  <div class="row">
+    <label>Chinese words / phrases (one per line, or comma-separated):</label><br>
+    <textarea id="words" placeholder="你好
+谢谢
+再见"></textarea>
+  </div>
+
+  <div class="row">
+    <label>Voice:</label>
+    <select id="voiceSelect"></select>
+    <span class="hint">(list depends on your browser/OS — Chrome usually has the most Chinese voices)</span>
+  </div>
+
+  <div class="row">
+    <label>Speaking rate:</label>
+    <input type="number" id="rate" value="0.9" step="0.1" min="0.3" max="2">
+    <span class="hint">(1.0 = normal speed, lower = slower)</span>
+  </div>
+
+  <div class="row">
+    <label>Seconds of silence between words:</label>
+    <input type="number" id="gap" value="5" step="0.5" min="0.5">
+  </div>
+
+  <div class="row">
+    <label>Repeat each word:</label>
+    <input type="number" id="repeat" value="1" min="1" max="5"> time(s)
+    <span class="hint">(speaks the word this many times before moving to the gap)</span>
+  </div>
+
+  <div class="row">
+    <label>Seconds of silence before the first word:</label>
+    <input type="number" id="leadin" value="2" step="0.5" min="0">
+  </div>
+
+  <div class="row">
+    <button id="playBtn">▶ Start Dictation</button>
+    <button id="stopBtn" disabled>■ Stop</button>
+  </div>
+
+  <div id="wordlist"></div>
+  <div id="log"></div>
+
+  <script>
+    /*
+     * ==========================================================================
+     * Tingxie Dictation Tool
+     * ==========================================================================
+     * How it works:
+     *   1. The user types in a list of Chinese words/phrases.
+     *   2. We use the browser's built-in `speechSynthesis` API (part of the
+     *      Web Speech API) to speak each word aloud, one at a time.
+     *   3. Between words we just `setTimeout` for the configured gap, giving
+     *      the listener time to write down what they heard.
+     *   4. The full word list is also printed to the page as an "answer key"
+     *      so the user (or a teacher) can check their work afterward.
+     *
+     * Why not generate a downloadable MP3?
+     *   `speechSynthesis` speaks directly out of the device's audio output;
+     *   it does not hand back raw audio data that we could bundle into a
+     *   file. Capturing it into an MP3 would require routing system audio
+     *   through the Web Audio API, which is unreliable across browsers and
+     *   adds a lot of complexity. Playing it live keeps this tool simple,
+     *   dependency-free, and fully offline.
+     * ==========================================================================
+     */
+
+    // Grab references to all the page elements we need.
+    const wordsInput = document.getElementById('words');
+    const voiceSelect = document.getElementById('voiceSelect');
+    const rateInput = document.getElementById('rate');
+    const gapInput = document.getElementById('gap');
+    const repeatInput = document.getElementById('repeat');
+    const leadinInput = document.getElementById('leadin');
+    const playBtn = document.getElementById('playBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const wordlistEl = document.getElementById('wordlist');
+    const logEl = document.getElementById('log');
+
+    // This flag lets us cleanly cancel an in-progress dictation session.
+    let isStopped = false;
+
+    /**
+     * Appends a line to the on-screen log box (auto-scrolls to the bottom).
+     */
+    function log(message) {
+      logEl.textContent += message + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    /**
+     * Splits the textarea content into a clean array of words.
+     * Accepts newlines, commas, or full-width Chinese commas as separators.
+     */
+    function parseWords(text) {
+      return text
+        .split(/[\n,，]+/)
+        .map(word => word.trim())
+        .filter(word => word.length > 0);
+    }
+
+    /**
+     * Populates the voice dropdown with any Chinese (or fallback) voices
+     * the browser has available. Voice lists load asynchronously in some
+     * browsers, so we listen for the 'voiceschanged' event as well.
+     */
+    function populateVoiceList() {
+      const allVoices = speechSynthesis.getVoices();
+
+      // Prefer Chinese voices, but fall back to showing everything if none exist.
+      const chineseVoices = allVoices.filter(v => v.lang.toLowerCase().startsWith('zh'));
+      const voicesToShow = chineseVoices.length > 0 ? chineseVoices : allVoices;
+
+      voiceSelect.innerHTML = '';
+      voicesToShow.forEach((voice, index) => {
+        const option = document.createElement('option');
+        option.value = index;
+        option.textContent = `${voice.name} (${voice.lang})`;
+        voiceSelect.appendChild(option);
+      });
+
+      // Store the filtered list on the select element so we can look voices
+      // up by index later, without re-filtering.
+      voiceSelect.voices = voicesToShow;
+
+      if (voicesToShow.length === 0) {
+        log('No voices found yet — some browsers load them a moment after the page opens.');
+      }
+    }
+
+    populateVoiceList();
+    // Some browsers (notably Chrome) load voices asynchronously.
+    speechSynthesis.onvoiceschanged = populateVoiceList;
+
+    /**
+     * Speaks a single word/phrase and resolves the returned Promise once
+     * speech has finished (or if an error occurs, so we don't hang forever).
+     */
+    function speakWord(word, voice, rate) {
+      return new Promise((resolve) => {
+        const utterance = new SpeechSynthesisUtterance(word);
+        utterance.lang = voice ? voice.lang : 'zh-CN';
+        if (voice) utterance.voice = voice;
+        utterance.rate = rate;
+
+        utterance.onend = resolve;
+        utterance.onerror = resolve; // Don't let one failed word stop the whole list.
+
+        speechSynthesis.speak(utterance);
+      });
+    }
+
+    /**
+     * Waits for the given number of seconds, unless the user has pressed Stop.
+     */
+    function wait(seconds) {
+      return new Promise(resolve => setTimeout(resolve, seconds * 1000));
+    }
+
+    /**
+     * Runs the full dictation sequence: lead-in silence, then each word
+     * (repeated as configured) with a gap after every repetition.
+     */
+    async function runDictation() {
+      const words = parseWords(wordsInput.value);
+      if (words.length === 0) {
+        alert('Please enter at least one word.');
+        return;
+      }
+
+      const rate = parseFloat(rateInput.value) || 1;
+      const gap = parseFloat(gapInput.value) || 3;
+      const repeat = parseInt(repeatInput.value) || 1;
+      const leadin = parseFloat(leadinInput.value) || 0;
+      const selectedIndex = voiceSelect.value;
+      const voice = voiceSelect.voices ? voiceSelect.voices[selectedIndex] : null;
+
+      // Reset the UI for a new run.
+      logEl.textContent = '';
+      isStopped = false;
+      playBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      // Show the answer key up front so it's easy to check work afterward.
+      wordlistEl.innerHTML =
+        '<b>Word order (answer key):</b><br>' +
+        words.map((w, i) => `${i + 1}. ${w}`).join('<br>');
+
+      log(`Starting dictation of ${words.length} word(s)...`);
+      await wait(leadin);
+
+      for (let i = 0; i < words.length; i++) {
+        if (isStopped) break;
+
+        const word = words[i];
+        log(`Speaking "${word}" (${i + 1}/${words.length})`);
+
+        for (let r = 0; r < repeat; r++) {
+          if (isStopped) break;
+          await speakWord(word, voice, rate);
+          await wait(gap);
+        }
+      }
+
+      log(isStopped ? 'Stopped.' : 'Done!');
+      playBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+
+    // ---------- Button wiring ----------
+
+    playBtn.addEventListener('click', () => {
+      runDictation();
+    });
+
+    stopBtn.addEventListener('click', () => {
+      isStopped = true;
+      speechSynthesis.cancel(); // Immediately stops any word currently being spoken.
+      playBtn.disabled = false;
+      stopBtn.disabled = true;
+      log('Stop requested.');
+    });
+  </script>
+</body>
+
+</html>
