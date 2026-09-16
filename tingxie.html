@@ -117,6 +117,11 @@
   </div>
 
   <div class="row">
+    <label>Seconds between repeats of the same word:</label>
+    <input type="number" id="repeatGap" value="1" step="0.5" min="0">
+  </div>
+
+  <div class="row">
     <label>Seconds of silence before the first word:</label>
     <input type="number" id="leadin" value="2" step="0.5" min="0">
   </div>
@@ -258,6 +263,7 @@
 
       const rate = parseFloat(rateInput.value) || 1;
       const gap = parseFloat(gapInput.value) || 3;
+      const repeatGap = parseFloat(document.getElementById('repeatGap').value) || 1;
       const repeat = parseInt(repeatInput.value) || 1;
       const leadin = parseFloat(leadinInput.value) || 0;
       const selectedIndex = voiceSelect.value;
@@ -286,8 +292,11 @@
         for (let r = 0; r < repeat; r++) {
           if (isStopped) break;
           await speakWord(word, voice, rate);
-          await wait(gap);
+          // Short pause between repeats of the same word, but no pause after the last repeat
+          // (the longer inter-word gap gets added once below instead).
+          if (r < repeat - 1) await wait(repeatGap);
         }
+        await wait(gap);
       }
 
       log(isStopped ? 'Stopped.' : 'Done!');
